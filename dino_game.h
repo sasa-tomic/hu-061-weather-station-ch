@@ -164,7 +164,7 @@ const uint8_t cactus_double[] PROGMEM = {
 // Chrome-like physics (positive = upward)
 // Jump peaks at ~30px (clears tall cacti at 18px with room to spare)
 const float GRAVITY = -1.2;
-const float JUMP_FORCE = 8.0;
+const float JUMP_FORCE = 8.6;
 // Faster gravity on descent for snappier feel
 const float GRAVITY_DOWN = -1.8;
 
