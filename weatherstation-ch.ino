@@ -27,6 +27,7 @@ See more at https://thingpulse.com
 
 #include <ESPWiFi.h>
 #include <ESPHTTPClient.h>
+#include <ArduinoOTA.h>
 #include <JsonListener.h>
 
 #include <time.h>
@@ -162,6 +163,29 @@ void setup() {
     delay(2000);
   }
 
+  // OTA updates (only when WiFi is available)
+  if (wifiConnected) {
+    ArduinoOTA.setHostname("weatherclock");
+    ArduinoOTA.onStart([]() {
+      display.clear();
+      display.drawString(64, 10, "OTA Update...");
+      display.display();
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+      display.clear();
+      display.drawString(64, 10, "OTA Update...");
+      display.drawProgressBar(2, 28, 124, 10, progress / (total / 100));
+      display.display();
+    });
+    ArduinoOTA.onEnd([]() {
+      display.clear();
+      display.drawString(64, 20, "Neustart...");
+      display.display();
+    });
+    ArduinoOTA.begin();
+    LOG("[ota] ready");
+  }
+
   configTzTime(TZ_INFO, "ch.pool.ntp.org", "pool.ntp.org");
 
   ui.setTargetFPS(30);
@@ -182,6 +206,8 @@ void setup() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
+
   // Dino game takes over the display when active
   if (gameLoop(&display)) {
     delay(1000 / 20); // ~20 FPS for game
