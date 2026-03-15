@@ -102,6 +102,15 @@ OpenWeatherMapCurrent currentWeatherClient;
 OpenWeatherMapForecastData forecasts[MAX_FORECASTS];
 OpenWeatherMapForecast forecastClient;
 
+// Rain forecast (next 8 × 3h slots = 24h lookahead)
+const uint8_t RAIN_SLOTS = 8;
+const float RAIN_THRESHOLD = 1.0;  // mm/3h
+OpenWeatherMapForecastData rainForecast[RAIN_SLOTS];
+uint8_t rainSlotsFound = 0;
+float maxRain = 0;        // peak mm/3h across all slots
+float totalRain = 0;      // sum across all slots
+bool rainExpected = false;
+
 time_t now;
 bool readyForWeatherUpdate = false;
 bool wifiConnected = false;
@@ -114,10 +123,11 @@ void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, in
 void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex);
+void drawRainForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state);
 
-FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawForecast };
-int numberOfFrames = 3;
+FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawForecast, drawRainForecast };
+int numberOfFrames = 4;
 
 OverlayCallback overlays[] = { drawHeaderOverlay };
 int numberOfOverlays = 1;
@@ -262,6 +272,22 @@ void updateData(OLEDDisplay *display) {
   }
 #endif
 
+  // Rain forecast (next 24h in 3h slots, no hour filter)
+  drawProgress(display, 80, "Regen prüfen...");
+  OpenWeatherMapForecast rainClient;
+  rainClient.setMetric(IS_METRIC);
+  rainClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
+  rainSlotsFound = rainClient.updateForecastsById(rainForecast, OWM_API_KEY, OWM_LOCATION_ID, RAIN_SLOTS);
+  rainExpected = false;
+  maxRain = 0;
+  totalRain = 0;
+  for (uint8_t i = 0; i < rainSlotsFound; i++) {
+    LOG("[rain] slot " + String(i) + " rain=" + String(rainForecast[i].rain) + "mm");
+    totalRain += rainForecast[i].rain;
+    if (rainForecast[i].rain > maxRain) maxRain = rainForecast[i].rain;
+    if (rainForecast[i].rain >= RAIN_THRESHOLD) rainExpected = true;
+  }
+
   readyForWeatherUpdate = false;
   drawProgress(display, 100, "Fertig!");
   delay(1000);
@@ -321,6 +347,55 @@ void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
+void drawRainForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+  display->setFont(ArialMT_Plain_10);
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->drawString(0 + x, 0 + y, "Regen 24h");
+
+  // Total mm on the right
+  display->setTextAlignment(TEXT_ALIGN_RIGHT);
+  display->drawString(128 + x, 0 + y, String(totalRain, 1) + "mm");
+
+  if (rainSlotsFound == 0) {
+    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->drawString(64 + x, 22 + y, "Keine Daten");
+    return;
+  }
+
+  // Bar chart area: y=13..42 (30px tall), 8 bars
+  const int barAreaTop = 13;
+  const int barAreaH = 28;
+  const int barW = 12;
+  const int gap = 2;
+  const int startX = 4;
+
+  // Scale: cap at 10mm for full height, auto-scale if higher
+  float scale = maxRain > 10.0 ? maxRain : 10.0;
+
+  for (uint8_t i = 0; i < rainSlotsFound; i++) {
+    int bx = startX + i * (barW + gap) + (int)x;
+    int barH = (int)(rainForecast[i].rain / scale * barAreaH);
+    if (barH < 1 && rainForecast[i].rain > 0) barH = 1;
+
+    // Draw bar
+    if (barH > 0) {
+      display->fillRect(bx, barAreaTop + barAreaH - barH + (int)y, barW, barH);
+    }
+
+    // Draw outline for empty bars
+    display->drawRect(bx, barAreaTop + (int)y, barW, barAreaH);
+
+    // Time label below bar
+    time_t obsTime = (time_t)rainForecast[i].observationTime;
+    struct tm* ti = localtime(&obsTime);
+    char lbl[4];
+    sprintf_P(lbl, PSTR("%02d"), ti->tm_hour);
+    display->setFont(ArialMT_Plain_10);
+    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->drawString(bx + barW / 2, 42 + (int)y, String(lbl));
+  }
+}
+
 void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
   now = time(nullptr);
   struct tm* timeInfo;
@@ -339,4 +414,12 @@ void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
   String temp = String(currentWeather.temp, 1) + (IS_METRIC ? "°C" : "°F");
   display->drawString(128, 54, temp);
   display->drawHorizontalLine(0, 52, 128);
+
+  // Rain intensity bar (fills along y=51, proportional to maxRain, cap 10mm)
+  if (maxRain > 0) {
+    int barW = (int)(maxRain / 10.0 * 128);  // 10mm = full width
+    if (barW > 128) barW = 128;
+    if (barW < 2) barW = 2;
+    display->fillRect(0, 51, barW, 2);
+  }
 }
