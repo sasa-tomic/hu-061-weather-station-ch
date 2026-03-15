@@ -14,6 +14,7 @@ Usage:
 import argparse
 import glob
 import os
+import socket
 import subprocess
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -86,34 +87,86 @@ def write_config(values):
     print("\n  config.h written.")
 
 
+OTA_HOST = "weatherclock.local"
+
+
 def detect_port():
     """Try to find the ESP01 serial port."""
     ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
     return ports[0] if ports else None
 
 
+def detect_ota():
+    """Check if the device is reachable via mDNS for OTA upload."""
+    try:
+        ip = socket.getaddrinfo(OTA_HOST, 8266, socket.AF_INET)[0][4][0]
+        return ip
+    except (socket.gaierror, OSError):
+        return None
+
+
 def build_and_upload():
     """Build and optionally upload with PlatformIO."""
-    port = detect_port()
-
     print("\n  Compiling...")
     result = subprocess.run(["pio", "run"], cwd=SCRIPT_DIR)
     if result.returncode != 0:
         print("  Build failed.")
         return
 
-    print("  Build OK!")
+    print("  Build OK!\n")
 
-    if port:
-        upload = input(f"\n  Upload to {port}? [Y/n]: ").strip().lower()
-        if upload in ("", "y", "yes"):
-            print(f"  Uploading to {port}...")
-            subprocess.run(
-                ["pio", "run", "-t", "upload", "--upload-port", port],
-                cwd=SCRIPT_DIR,
-            )
+    # Detect available upload methods
+    ota_ip = detect_ota()
+    usb_port = detect_port()
+
+    options = []
+    if ota_ip:
+        options.append(("ota", ota_ip))
+        print(f"  [OTA] Found {OTA_HOST} at {ota_ip}")
+    if usb_port:
+        options.append(("usb", usb_port))
+        print(f"  [USB] Found device at {usb_port}")
+
+    if not options:
+        print("  No device found — neither OTA nor USB.")
+        print(f"  For OTA: make sure {OTA_HOST} is on your network.")
+        print("  For USB: connect the ESP01 via USB adapter.")
+        return
+
+    # If both available, let user choose
+    if len(options) == 1:
+        method, target = options[0]
     else:
-        print("  No ESP01 detected on USB — skipping upload.")
+        print()
+        for i, (method, target) in enumerate(options, 1):
+            label = "OTA (wireless)" if method == "ota" else "USB (serial)"
+            print(f"  {i}) {label} — {target}")
+        print(f"  {len(options) + 1}) Skip upload")
+
+        choice = input(f"\n  Upload method [1]: ").strip()
+        if choice == str(len(options) + 1):
+            return
+        idx = int(choice) - 1 if choice.isdigit() and 0 < int(choice) <= len(options) else 0
+        method, target = options[idx]
+
+    if method == "ota":
+        confirm = input(f"\n  Upload OTA to {OTA_HOST} ({target})? [Y/n]: ").strip().lower()
+        if confirm not in ("", "y", "yes"):
+            return
+        print(f"  Uploading OTA to {target}...")
+        subprocess.run(
+            ["pio", "run", "-e", "esp01_ota", "-t", "upload", "--upload-port", target],
+            cwd=SCRIPT_DIR,
+        )
+    else:
+        confirm = input(f"\n  Upload via USB to {target}? [Y/n]: ").strip().lower()
+        if confirm not in ("", "y", "yes"):
+            return
+        print(f"  Uploading to {target}...")
+        subprocess.run(
+            ["pio", "run", "-t", "upload", "--upload-port", target],
+            cwd=SCRIPT_DIR,
+        )
 
 
 def main():
