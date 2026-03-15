@@ -29,10 +29,9 @@ See more at https://thingpulse.com
 #include <ESPHTTPClient.h>
 #include <JsonListener.h>
 
-// time
-#include <time.h>                       // time() ctime()
-#include <sys/time.h>                   // struct timeval
-#include <coredecls.h>                  // settimeofday_cb()
+#include <time.h>
+#include <sys/time.h>
+#include <coredecls.h>
 
 #include "SSD1306Wire.h"
 #include "OLEDDisplayUi.h"
@@ -42,76 +41,58 @@ See more at https://thingpulse.com
 #include "WeatherStationFonts.h"
 #include "WeatherStationImages.h"
 
+#include "config.h"
+
+// Uncomment for serial debug logging
+// #define DEBUG
+
+#ifdef DEBUG
+  #define LOG(x)   Serial.println(x)
+  #define LOGF(x)  Serial.print(x)
+#else
+  #define LOG(x)
+  #define LOGF(x)
+#endif
 
 /***************************
- * Begin Settings
+ * Settings
  **************************/
 
-// WIFI
-const char* WIFI_SSID = "nest24";
-const char* WIFI_PWD = "<prompt>";
+// POSIX TZ for Switzerland — auto DST, no firmware update needed
+#define TZ_INFO "CET-1CEST,M3.5.0/2,M10.5.0/3"
 
-#define TZ              10      // (utc+) TZ in hours
-#define DST_MN          60      // use 60mn for summer time in some countries
+const int UPDATE_INTERVAL_SECS = 20 * 60;
+const int WIFI_TIMEOUT_MS = 20000;
 
-// Setup
-const int UPDATE_INTERVAL_SECS = 20 * 60; // Update every 20 minutes
-
-// Display Settings
+// Display
 const int I2C_DISPLAY_ADDRESS = 0x3c;
 #if defined(ESP8266)
   #if defined(D3)
 const int SDA_PIN = D3;
 const int SDC_PIN = D4;
-  #warning ESP8266
   #else
-const int SDA_PIN = 0; //GPIO0;
-const int SDC_PIN = 2; //GPIO2; 
-  #warning ESP01
-  #endif  
+const int SDA_PIN = 0;
+const int SDC_PIN = 2;
+  #endif
 #else
-const int SDA_PIN = 5; //D3;
-const int SDC_PIN = 4; //D4;
-  #warning GENERIC
+const int SDA_PIN = 5;
+const int SDC_PIN = 4;
 #endif
 
-
-// OpenWeatherMap Settings
-// Sign up here to get an API key:
-// https://docs.thingpulse.com/how-tos/openweathermap-key/
-String OPEN_WEATHER_MAP_APP_ID = "XXXXXXXXXXXX";
-/*
-Go to https://openweathermap.org/find?q= and search for a location. Go through the
-result set and select the entry closest to the actual location you want to display 
-data for. It'll be a URL like https://openweathermap.org/city/2657896. The number
-at the end is what you assign to the constant below.
- */
-String OPEN_WEATHER_MAP_LOCATION_ID = "2147714";
-
-// Pick a language code from this list:
-// Arabic - ar, Bulgarian - bg, Catalan - ca, Czech - cz, German - de, Greek - el,
-// English - en, Persian (Farsi) - fa, Finnish - fi, French - fr, Galician - gl,
-// Croatian - hr, Hungarian - hu, Italian - it, Japanese - ja, Korean - kr,
-// Latvian - la, Lithuanian - lt, Macedonian - mk, Dutch - nl, Polish - pl,
-// Portuguese - pt, Romanian - ro, Russian - ru, Swedish - se, Slovak - sk,
-// Slovenian - sl, Spanish - es, Turkish - tr, Ukrainian - ua, Vietnamese - vi,
-// Chinese Simplified - zh_cn, Chinese Traditional - zh_tw.
-String OPEN_WEATHER_MAP_LANGUAGE = "en";
+String OPEN_WEATHER_MAP_LANGUAGE = "de";
 const uint8_t MAX_FORECASTS = 4;
-
 const boolean IS_METRIC = true;
 
-// Adjust according to your language
-const String WDAY_NAMES[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
-const String MONTH_NAMES[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+// Swiss German day/month names
+const String WDAY_NAMES[] = {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"};
+const String MONTH_NAMES[] = {"Jan", "Feb", "Mar", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"};
 
 /***************************
  * End Settings
  **************************/
- // Initialize the oled display for address 0x3c
- // sda-pin=14 and sdc-pin=12
- SSD1306Wire     display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);
- OLEDDisplayUi   ui( &display );
+
+SSD1306Wire   display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);
+OLEDDisplayUi ui(&display);
 
 OpenWeatherMapCurrentData currentWeather;
 OpenWeatherMapCurrent currentWeatherClient;
@@ -119,19 +100,12 @@ OpenWeatherMapCurrent currentWeatherClient;
 OpenWeatherMapForecastData forecasts[MAX_FORECASTS];
 OpenWeatherMapForecast forecastClient;
 
-#define TZ_MN           ((TZ)*60)
-#define TZ_SEC          ((TZ)*3600)
-#define DST_SEC         ((DST_MN)*60)
 time_t now;
-
-// flag changed in the ticker function every 10 minutes
 bool readyForWeatherUpdate = false;
-
-String lastUpdate = "--";
-
+bool wifiConnected = false;
 long timeSinceLastWUpdate = 0;
 
-//declaring prototypes
+// prototypes
 void drawProgress(OLEDDisplay *display, int percentage, String label);
 void updateData(OLEDDisplay *display);
 void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
@@ -139,12 +113,7 @@ void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t
 void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex);
 void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state);
-void setReadyForWeatherUpdate();
 
-
-// Add frames
-// this array keeps function pointers to all frames
-// frames are the single views that slide from right to left
 FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawForecast };
 int numberOfFrames = 3;
 
@@ -154,69 +123,64 @@ int numberOfOverlays = 1;
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  Serial.println();
 
-  // initialize dispaly
   display.init();
   display.clear();
   display.display();
-
-  //display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
   display.setContrast(255);
 
+  // WiFi with timeout
   WiFi.begin(WIFI_SSID, WIFI_PWD);
-
   int counter = 0;
+  unsigned long wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - wifiStart > WIFI_TIMEOUT_MS) {
+      LOG("[wifi] timeout");
+      break;
+    }
     delay(500);
-    Serial.print(".");
+    LOGF(".");
     display.clear();
-    display.drawString(64, 10, "Connecting to WiFi");
+    display.drawString(64, 10, "WLAN verbinden...");
     display.drawXbm(46, 30, 8, 8, counter % 3 == 0 ? activeSymbole : inactiveSymbole);
     display.drawXbm(60, 30, 8, 8, counter % 3 == 1 ? activeSymbole : inactiveSymbole);
     display.drawXbm(74, 30, 8, 8, counter % 3 == 2 ? activeSymbole : inactiveSymbole);
     display.display();
-
     counter++;
   }
-  // Get time from network time service
-  configTime(TZ_SEC, DST_SEC, "pool.ntp.org");
+
+  wifiConnected = (WiFi.status() == WL_CONNECTED);
+  if (wifiConnected) {
+    LOG("[wifi] connected, IP=" + WiFi.localIP().toString());
+  } else {
+    display.clear();
+    display.drawString(64, 20, "Kein WLAN");
+    display.display();
+    delay(2000);
+  }
+
+  configTzTime(TZ_INFO, "ch.pool.ntp.org", "pool.ntp.org");
 
   ui.setTargetFPS(30);
-
   ui.setActiveSymbol(activeSymbole);
   ui.setInactiveSymbol(inactiveSymbole);
-
-  // You can change this to
-  // TOP, LEFT, BOTTOM, RIGHT
   ui.setIndicatorPosition(BOTTOM);
-
-  // Defines where the first frame is located in the bar.
   ui.setIndicatorDirection(LEFT_RIGHT);
-
-  // You can change the transition that is used
-  // SLIDE_LEFT, SLIDE_RIGHT, SLIDE_TOP, SLIDE_DOWN
   ui.setFrameAnimation(SLIDE_LEFT);
-
   ui.setFrames(frames, numberOfFrames);
-
   ui.setOverlays(overlays, numberOfOverlays);
-
-  // Inital UI takes care of initalising the display too.
   ui.init();
 
-  Serial.println("");
-
-  updateData(&display);
-
+  if (wifiConnected) {
+    updateData(&display);
+  }
 }
 
 void loop() {
-
-  if (millis() - timeSinceLastWUpdate > (1000L*UPDATE_INTERVAL_SECS)) {
-    setReadyForWeatherUpdate();
+  if (millis() - timeSinceLastWUpdate > (1000L * UPDATE_INTERVAL_SECS)) {
+    readyForWeatherUpdate = true;
     timeSinceLastWUpdate = millis();
   }
 
@@ -225,15 +189,9 @@ void loop() {
   }
 
   int remainingTimeBudget = ui.update();
-
   if (remainingTimeBudget > 0) {
-    // You can do some work here
-    // Don't do stuff if you are below your
-    // time budget.
     delay(remainingTimeBudget);
   }
-
-
 }
 
 void drawProgress(OLEDDisplay *display, int percentage, String label) {
@@ -246,40 +204,45 @@ void drawProgress(OLEDDisplay *display, int percentage, String label) {
 }
 
 void updateData(OLEDDisplay *display) {
-  drawProgress(display, 10, "Updating time...");
-  drawProgress(display, 30, "Updating weather...");
+  drawProgress(display, 10, "Zeit aktualisieren...");
+
+  drawProgress(display, 30, "Wetter laden...");
   currentWeatherClient.setMetric(IS_METRIC);
   currentWeatherClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
-  currentWeatherClient.updateCurrentById(&currentWeather, OPEN_WEATHER_MAP_APP_ID, OPEN_WEATHER_MAP_LOCATION_ID);
-  drawProgress(display, 50, "Updating forecasts...");
+  currentWeatherClient.updateCurrentById(&currentWeather, OWM_API_KEY, OWM_LOCATION_ID);
+  LOG("[weather] temp=" + String(currentWeather.temp) + " desc=" + currentWeather.description);
+
+  drawProgress(display, 50, "Vorhersage laden...");
   forecastClient.setMetric(IS_METRIC);
   forecastClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
   uint8_t allowedHours[] = {12};
   forecastClient.setAllowedHours(allowedHours, sizeof(allowedHours));
-  forecastClient.updateForecastsById(forecasts, OPEN_WEATHER_MAP_APP_ID, OPEN_WEATHER_MAP_LOCATION_ID, MAX_FORECASTS);
+  uint8_t found = forecastClient.updateForecastsById(forecasts, OWM_API_KEY, OWM_LOCATION_ID, MAX_FORECASTS);
+  (void)found;
+  LOG("[forecast] found=" + String(found) + "/" + String(MAX_FORECASTS));
+#ifdef DEBUG
+  for (uint8_t i = 0; i < found; i++) {
+    LOG("[forecast] [" + String(i) + "] temp=" + String(forecasts[i].temp) + " t=" + String(forecasts[i].observationTime));
+  }
+#endif
 
   readyForWeatherUpdate = false;
-  drawProgress(display, 100, "Done...");
+  drawProgress(display, 100, "Fertig!");
   delay(1000);
 }
-
-
 
 void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   now = time(nullptr);
   struct tm* timeInfo;
   timeInfo = localtime(&now);
-  char buff[16];
-
+  char buff[32];
 
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
-  String date = WDAY_NAMES[timeInfo->tm_wday];
-
-  sprintf_P(buff, PSTR("%s, %02d/%02d/%04d"), WDAY_NAMES[timeInfo->tm_wday].c_str(), timeInfo->tm_mday, timeInfo->tm_mon+1, timeInfo->tm_year + 1900);
+  sprintf_P(buff, PSTR("%s, %02d.%02d.%04d"), WDAY_NAMES[timeInfo->tm_wday].c_str(), timeInfo->tm_mday, timeInfo->tm_mon+1, timeInfo->tm_year + 1900);
   display->drawString(64 + x, 5 + y, String(buff));
-  display->setFont(ArialMT_Plain_24);
 
+  display->setFont(ArialMT_Plain_24);
   sprintf_P(buff, PSTR("%02d:%02d:%02d"), timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
   display->drawString(64 + x, 15 + y, String(buff));
   display->setTextAlignment(TEXT_ALIGN_LEFT);
@@ -299,7 +262,6 @@ void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->drawString(32 + x, 0 + y, currentWeather.iconMeteoCon);
 }
-
 
 void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   drawForecastDetails(display, x, y, 0);
@@ -334,13 +296,11 @@ void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->drawString(0, 54, String(buff));
+  display->setTextAlignment(TEXT_ALIGN_CENTER);
+  String hum = String((int)currentWeather.humidity) + "%";
+  display->drawString(64, 54, hum);
   display->setTextAlignment(TEXT_ALIGN_RIGHT);
   String temp = String(currentWeather.temp, 1) + (IS_METRIC ? "C" : "F");
   display->drawString(128, 54, temp);
   display->drawHorizontalLine(0, 52, 128);
-}
-
-void setReadyForWeatherUpdate() {
-  Serial.println("Setting readyForUpdate to true");
-  readyForWeatherUpdate = true;
 }
