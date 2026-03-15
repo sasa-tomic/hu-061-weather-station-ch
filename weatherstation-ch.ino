@@ -42,6 +42,7 @@ See more at https://thingpulse.com
 #include "WeatherStationImages.h"
 
 #include "config.h"
+#include "dino_game.h"
 
 // Uncomment for serial debug logging
 // #define DEBUG
@@ -176,9 +177,18 @@ void setup() {
   if (wifiConnected) {
     updateData(&display);
   }
+
+  gameInit();
 }
 
 void loop() {
+  // Dino game takes over the display when active
+  if (gameLoop(&display)) {
+    delay(1000 / 20); // ~20 FPS for game
+    return;
+  }
+
+  // Normal weather station mode
   if (millis() - timeSinceLastWUpdate > (1000L * UPDATE_INTERVAL_SECS)) {
     readyForWeatherUpdate = true;
     timeSinceLastWUpdate = millis();
