@@ -224,6 +224,12 @@ void loop() {
     return;
   }
 
+  // In regular mode, button press immediately switches to next screen
+  if (btnPressed) {
+    btnPressed = false;
+    ui.nextFrame();
+  }
+
   // Normal weather station mode
   if (millis() - timeSinceLastWUpdate > (1000L * UPDATE_INTERVAL_SECS)) {
     readyForWeatherUpdate = true;

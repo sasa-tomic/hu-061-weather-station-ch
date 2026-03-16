@@ -217,6 +217,7 @@ void IRAM_ATTR buttonISR() {
 
 void gameInit() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 }
 
 void spawnCloud() {
@@ -232,15 +233,13 @@ void spawnCloud() {
 }
 
 void gameExitToWeather() {
-  detachInterrupt(digitalPinToInterrupt(BUTTON_PIN));
+  // Keep interrupt attached for regular mode button handling
+  btnPressed = false;  // Clear any pending press
   gameState = GAME_IDLE;
 }
 
 void gameReset() {
-  // Attach interrupt for reliable short press detection
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
   btnPressed = false;
-  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
   dinoY = 0;
   dinoVel = 0;
   dinoOnGround = true;
