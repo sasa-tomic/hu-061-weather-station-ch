@@ -180,7 +180,7 @@ bool nightMode = false;
 
 int score = 0;
 int highScore = 0;
-int gameSpeed = 2;
+int gameSpeed = 3;
 int spawnTimer = 0;
 int groundOffset = 0;
 
