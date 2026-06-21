@@ -29,6 +29,7 @@ See more at https://thingpulse.com
 #include <ESPHTTPClient.h>
 #include <ArduinoOTA.h>
 #include <JsonListener.h>
+#include <Ticker.h>
 
 #include <time.h>
 #include <sys/time.h>
@@ -64,7 +65,12 @@ See more at https://thingpulse.com
 #define TZ_INFO "CET-1CEST,M3.5.0/2,M10.5.0/3"
 
 const int UPDATE_INTERVAL_SECS = 20 * 60;
+const int RETRY_INTERVAL_SECS = 60;          // retry sooner after a failed/empty update
 const int WIFI_TIMEOUT_MS = 20000;
+// Hard cap per network request. The vendored weather library can hang forever
+// if the server accepts the connection but never sends data (its own timeout
+// check only runs while bytes are arriving). If a request exceeds this, reboot.
+const float NET_REQUEST_TIMEOUT_S = 15.0;
 
 // Display
 const int I2C_DISPLAY_ADDRESS = 0x3c;
@@ -115,6 +121,16 @@ time_t now;
 bool readyForWeatherUpdate = false;
 bool wifiConnected = false;
 long timeSinceLastWUpdate = 0;
+unsigned long nextUpdateDelayMs = (unsigned long)UPDATE_INTERVAL_SECS * 1000UL;
+
+// Independent timer that reboots the board if a network request hangs.
+// It runs from the SDK timer context, so it still fires even while the main
+// loop is politely yield()-ing inside a stuck WiFiClient read loop (which is
+// exactly when the software/hardware watchdogs keep getting fed and never trip).
+Ticker netWatchdog;
+void rebootOnNetHang() { ESP.reset(); }
+void armNetWatchdog(float seconds) { netWatchdog.once(seconds, rebootOnNetHang); }
+void disarmNetWatchdog() { netWatchdog.detach(); }
 
 // prototypes
 void drawProgress(OLEDDisplay *display, int percentage, String label);
@@ -145,6 +161,7 @@ void setup() {
 
   // WiFi with timeout
   WiFi.begin(WIFI_SSID, WIFI_PWD);
+  WiFi.setAutoReconnect(true);   // recover dropped links in the background
   int counter = 0;
   unsigned long wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -208,9 +225,9 @@ void setup() {
   ui.setOverlays(overlays, numberOfOverlays);
   ui.init();
 
-  if (wifiConnected) {
-    updateData(&display);
-  }
+  // Always call updateData(): if there's no link it returns immediately and
+  // schedules a short retry instead of leaving us idle for a full interval.
+  updateData(&display);
 
   gameInit();
 }
@@ -230,10 +247,11 @@ void loop() {
     ui.nextFrame();
   }
 
-  // Normal weather station mode
-  if (millis() - timeSinceLastWUpdate > (1000L * UPDATE_INTERVAL_SECS)) {
+  // Normal weather station mode. nextUpdateDelayMs is set by updateData():
+  // the normal interval on success, a short retry on failure.
+  if (!readyForWeatherUpdate &&
+      millis() - (unsigned long)timeSinceLastWUpdate > nextUpdateDelayMs) {
     readyForWeatherUpdate = true;
-    timeSinceLastWUpdate = millis();
   }
 
   if (readyForWeatherUpdate && ui.getUiState()->frameState == FIXED) {
@@ -256,12 +274,26 @@ void drawProgress(OLEDDisplay *display, int percentage, String label) {
 }
 
 void updateData(OLEDDisplay *display) {
+  // Anchor the schedule to now; nextUpdateDelayMs decides when we run again.
+  timeSinceLastWUpdate = millis();
+  readyForWeatherUpdate = false;
+
+  // No link → don't touch the network. Keep the last data on screen and retry
+  // soon; WiFi auto-reconnects in the background.
+  if (WiFi.status() != WL_CONNECTED) {
+    LOG("[update] WiFi down, retry in " + String(RETRY_INTERVAL_SECS) + "s");
+    nextUpdateDelayMs = (unsigned long)RETRY_INTERVAL_SECS * 1000UL;
+    return;
+  }
+
   drawProgress(display, 10, "Zeit aktualisieren...");
 
   drawProgress(display, 30, "Wetter laden...");
   currentWeatherClient.setMetric(IS_METRIC);
   currentWeatherClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
+  armNetWatchdog(NET_REQUEST_TIMEOUT_S);
   currentWeatherClient.updateCurrentById(&currentWeather, OWM_API_KEY, OWM_LOCATION_ID);
+  disarmNetWatchdog();
   LOG("[weather] temp=" + String(currentWeather.temp) + " desc=" + currentWeather.description);
 
   drawProgress(display, 50, "Vorhersage laden...");
@@ -269,8 +301,9 @@ void updateData(OLEDDisplay *display) {
   forecastClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
   uint8_t allowedHours[] = {12};
   forecastClient.setAllowedHours(allowedHours, sizeof(allowedHours));
+  armNetWatchdog(NET_REQUEST_TIMEOUT_S);
   uint8_t found = forecastClient.updateForecastsById(forecasts, OWM_API_KEY, OWM_LOCATION_ID, MAX_FORECASTS);
-  (void)found;
+  disarmNetWatchdog();
   LOG("[forecast] found=" + String(found) + "/" + String(MAX_FORECASTS));
 #ifdef DEBUG
   for (uint8_t i = 0; i < found; i++) {
@@ -283,7 +316,9 @@ void updateData(OLEDDisplay *display) {
   OpenWeatherMapForecast rainClient;
   rainClient.setMetric(IS_METRIC);
   rainClient.setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
+  armNetWatchdog(NET_REQUEST_TIMEOUT_S);
   rainSlotsFound = rainClient.updateForecastsById(rainForecast, OWM_API_KEY, OWM_LOCATION_ID, RAIN_SLOTS);
+  disarmNetWatchdog();
   rainExpected = false;
   maxRain = 0;
   totalRain = 0;
@@ -294,8 +329,14 @@ void updateData(OLEDDisplay *display) {
     if (rainForecast[i].rain >= RAIN_THRESHOLD) rainExpected = true;
   }
 
-  readyForWeatherUpdate = false;
-  drawProgress(display, 100, "Fertig!");
+  // An empty forecast means the fetch effectively failed (bad response, dropped
+  // mid-stream, etc.) — keep whatever we had and retry soon instead of waiting a
+  // full interval. On success, fall back to the normal cadence.
+  bool updateOk = (found > 0);
+  nextUpdateDelayMs = updateOk ? (unsigned long)UPDATE_INTERVAL_SECS * 1000UL
+                               : (unsigned long)RETRY_INTERVAL_SECS * 1000UL;
+
+  drawProgress(display, 100, updateOk ? "Fertig!" : "Erneut versuchen...");
   delay(1000);
 }
 
